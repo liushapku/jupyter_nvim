@@ -23,9 +23,10 @@ if 'NVIM_IPY_DEBUG_FILE' in os.environ:
 class TestPlugin(object):
     def __init__(self, nvim):
         self.nvim = nvim
+        self.app = JupyterNvimApp()
+        self.app.initialize(nvim, [])
+        self.bufapps = {}
         logger.info('Initialized')
-        # self.app = JupyterNvimApp()
-        # self.app.initialize([])
 
     @neovim.command('JupyterTestCommand', nargs="*", range=True)
     def testcommand(self, args, range):
@@ -44,6 +45,14 @@ class TestPlugin(object):
     @neovim.function('JupyterTestAsyncNestedFunction', sync=False)
     def testfunction(self, args):
         logger.info('test async nested function {}'.format(args))
+
+    @neovim.command('JupyterStart')
+    def start_child_app(self):
+        ident = self.nvim.current.buffer.number
+        bufapp = self.app.start_child_app(ident)
+        bufapp.register_out_vim_buffer(self.nvim.current.buffer)
+        self.bufapps[ident] = bufapp
+        logger.info('Started child app %s', bufapp.connection_file)
 
     @neovim.shutdown_hook
     def shutdown_hook(self):

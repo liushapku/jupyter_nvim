@@ -12,13 +12,12 @@ from tornado import gen, ioloop
 
 app = napp.JupyterNvimApp()
 app.initialize([])
-print(app.subcommand, app.subapp, app.generate_config)
+# print(app.subcommand, app.subapp, app.generate_config)
 
 # capp.JupyterContainerApp
 
 # # owned bufapp
 bufapp = bufapp0 = app.start_child_app(0, [])
-print(bufapp)
 print('connection file:', bufapp.connection_file)
 
 # this bufapp.start does Nothing. The ioloop is started in ThreadedKernelClient.start_channels()
@@ -32,7 +31,7 @@ bufapp.start()
 # bufapp.start()
 
 
-print('main thread:', threading.get_ident())
+# print('main thread:', threading.get_ident())
 # ioloop.IOLoop.instance().start()
 # time.sleep(10)
 
@@ -40,4 +39,4 @@ inputid = 0
 while(True):
     inputid += 1
     code = input('In [{}]: '.format(inputid))
-    bufapp.kernel_client.execute(code)
+    bufapp.execute(code)
