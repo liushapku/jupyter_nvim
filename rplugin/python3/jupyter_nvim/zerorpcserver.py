@@ -10,5 +10,5 @@ class NvimRPC:
 
 
 server = zerorpc.Server(NvimRPC())
-server.bind("ipc://jupyter-nvim")
+server.bind("ipc:///tmp/jupyter-nvim")
 server.run()
