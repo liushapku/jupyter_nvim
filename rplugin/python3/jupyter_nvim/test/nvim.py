@@ -9,10 +9,11 @@ import time
 from tornado import gen, ioloop
 import neovim
 
-nvim_socket = '/tmp/nvimwbF3ai/0'
+nvim_socket = '/tmp/jupyter-nvim1'
 nvim = neovim.attach('socket', path=nvim_socket)
 
 app = napp.JupyterNvimApp()
 app.initialize(nvim, [])
+bufapp = app.start_child_app(1, ['-f=nvim-test'])
 
 
