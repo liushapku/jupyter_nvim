@@ -1,7 +1,10 @@
 import neovim
 from neovim.api.buffer import Buffer, Range
 from neovim.api import NvimError
-from jupyter_container.application import JupyterChildApp, JupyterContainerApp
+from jupyter_container.application import (
+    JupyterChildApp, JupyterContainerApp, ClientMethodMixin
+)
+from jupyter_nvim.handlers import *
 import os
 import sys, traceback
 import json
@@ -18,10 +21,21 @@ import tempfile
 from dateutil.tz import tzutc
 
 __all__ = (
-    "JupyterIOPubMessageHandler",
     "JupyterNvimBufferApp",
     "JupyterNvimApp",
 )
+    # use kernel_client's following method to send message
+    # is_alive
+    # execute
+    # complete
+    # inspect
+    # history
+    # kernel_info
+    # comm_info
+    # shutdown
+    # is_complete
+    # input
+
 
 def catch_exception(f):
     def wrapper(self, *args, **kwargs):
@@ -36,84 +50,14 @@ def catch_exception(f):
     return wrapper
 
 
-class JupyterIOPubMessageHandler():
-    def __call__(self, message):
-        pass
-
-
-def client_method(f):
-    def wrapped(self, *args, **kwargs):
-        assert '_rv' not in kwargs, 'kwargs should not contain _rv'
-        client = getattr(self.kernel_client, f.__name__)
-        kwargs['_rv'] = client(*args, **kwargs)
-        rv = f(self, *args, **kwargs)
-        return rv
-    return wrapped
-
-class MsgHandler():
-    pass
-
-class OutBufMsgHandler(MsgHandler):
-    def __init__(self, nvim, buf, log):
-        self.nvim = nvim
-        self.buf = buf
-        self.log = log
-        super(OutBufMsgHandler, self).__init__()
-
-    def __call__(self, channel, msg, **kwargs):
-        return self.dispatch(channel, msg, **kwargs)
-
-    def get_execute_output(self, data):
-        output = data.get('text/plain')
-        if output is not None:
-            return output
-
-    def format_input_output(self, isinput, execution_count, string):
-        lines = string.split('\n')
-        header1 = ('In ' if isinput else 'Out') + ' [{}]: '.format(execution_count)
-        headers = ' ' * (len(header1)-2) + ': '
-        rv = []
-        rv.append(header1 + lines[0])
-        for line in lines[1:]:
-            rv.append(headers + line)
-
-        # add a new line after output
-        if not isinput:
-            rv.append('')
-        return rv
-
-    def dispatch(self, channel, msg, **kwargs):
-        content = msg.get('content')
-        msg_type = msg.get('msg_type')
-        parent_header = msg.get('parent_header')
-        if parent_header:
-            self.log.warning(msg_type)
-            if msg_type == 'execute_input':
-                self.buf.append(self.format_input_output(True, content['execution_count'], content['code']))
-            elif msg_type == 'execute_result':
-                output = self.get_execute_output(content['data'])
-                if output:
-                    self.buf.append(self.format_input_output(False, content['execution_count'], output))
-            elif msg_type == 'stream':
-                stream = content['text'].split('\n')
-                if stream and stream[-1] == '':
-                    stream.pop(-1)
-                self.buf.append(stream)
-            elif msg_type == 'error':
-                self.handle_error(content)
-
-    def handle_error(self, content, **kwargs):
-        message = content['{}: {}'.format(content['ename'], content['evalue'])]
-        self.buf.append(message.split('\n'))
-        with tempfile.TemporaryFile(mode='w') as tmp:
-            print(content['traceback'], file=tmp)
-            self.nvim.command('lgetfile ' + tmp.name)
-
-
 class JupyterNvimBufferApp(JupyterChildApp):
     def format_msg(self, channel, msg):
         buf = io.StringIO()
-        print('====', channel, self.msg_count[channel], '-', self.msg_count['all'], '=' * 50, file=buf)
+        if msg.pop('handled', False):
+            start, end = '=' * 4, '=' * 50
+        else:
+            start, end = '*' * 4, '*' * 50
+        print(start, channel, self.msg_count[channel], '-', self.msg_count['all'], end, file=buf)
         msg_time = msg['header']['date']
         if msg_time <= self.msg_last:
             print('----', self.msg_last, msg_time, file=buf)
@@ -137,20 +81,10 @@ class JupyterNvimBufferApp(JupyterChildApp):
             else:
                 print(val, file=buf)
         return buf.getvalue()
-    # use kernel_client's following method to send message
-    # is_alive
-    # execute
-    # complete
-    # inspect
-    # history
-    # kernel_info
-    # comm_info
-    # shutdown
-    # is_complete
-    # input
 
     def initialize(self, parent, identity, argv=None):
         super(JupyterNvimBufferApp, self).initialize(parent, identity, argv=argv)
+
         self.nvim = self.parent.nvim
         self._inspect_msg = None
         self.msg_last = datetime.datetime.now(tz=tzutc())
@@ -206,7 +140,7 @@ class JupyterNvimBufferApp(JupyterChildApp):
         self.log.info(self.format_msg(channel, msg))
 
     def on_shell_msg(self, msg):
-        self.handle_msg(self, 'shell', msg)
+        self.handle_msg('shell', msg)
 
     def on_iopub_msg(self, msg):
         self.handle_msg('iopub', msg)
@@ -217,13 +151,9 @@ class JupyterNvimBufferApp(JupyterChildApp):
     def on_hb_msg(self, msg):
         self.handle_msg('hb', msg)
 
-    @client_method
-    def execute(self, *args, **kwargs):
-        self.wait_for(kwargs['_rv'])  # _rv is injected by client call
-        self.log.info('executing %s', kwargs['_rv'])
-
-    def wait_for(self, msgid):
+    def shell_send_callback(self, msgid):
         assert msgid not in self.waiting_list
+        self.log.info('waiting for %s', msgid)
         self.waiting_list.add(msgid)
 
     def is_waiting_for(self, parent_header):
@@ -270,3 +200,9 @@ class JupyterNvimApp(JupyterContainerApp):
         bufapp.register_out_vim_buffer(childid)
         self.log.info('Started child app %d, connection file %s', childid, bufapp.connection_file)
         return bufapp
+
+    def current_child(self):
+        current_buf = self.nvim.current.buffer.number
+        if current_buf in self._child_apps:
+            return current_buf
+

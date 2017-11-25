@@ -6,7 +6,6 @@ import os
 import neovim
 import logging
 from jupyter_nvim.nvimapp import (
-    JupyterIOPubMessageHandler,
     JupyterNvimBufferApp,
     JupyterNvimApp,
 )
