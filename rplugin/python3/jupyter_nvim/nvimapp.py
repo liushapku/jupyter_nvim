@@ -2,7 +2,8 @@ import neovim
 from neovim.api.buffer import Buffer, Range
 from neovim.api import NvimError
 from jupyter_container.application import (
-    JupyterChildApp, JupyterContainerApp, ClientMethodMixin
+    JupyterChildApp, JupyterContainerApp, ClientMethodMixin,
+    catch_exception
 )
 from jupyter_nvim.handlers import *
 import os
@@ -37,17 +38,6 @@ __all__ = (
     # input
 
 
-def catch_exception(f):
-    def wrapper(self, *args, **kwargs):
-        try:
-            return f(self, *args, **kwargs)
-        except Exception as ex:
-            self.log.error('==== EXCEPTION %s', ex)
-            buf = io.StringIO()
-            traceback.print_tb(sys.exc_info()[2], limit=None, file=buf)
-            self.log.error(buf.getvalue())
-
-    return wrapper
 
 
 class JupyterNvimBufferApp(JupyterChildApp):
@@ -102,6 +92,11 @@ class JupyterNvimBufferApp(JupyterChildApp):
         self.ibuf = set()
         self.iobuf = set()
 
+    def on_finish_kernel_info(self, kernel_info, pending_iopub_msg):
+        for handler in self.buf_handlers:
+            handler.on_finish_kernel_info(kernel_info, pending_iopub_msg)
+
+
     def register_out_vim_buffer(self, bufno):
         if bufno not in self.obuf:
             self.obuf.add(bufno)
@@ -115,18 +110,6 @@ class JupyterNvimBufferApp(JupyterChildApp):
 
     def output(self, msg):
         self.log.info(msg)
-
-    # KernelClient.start_channels() fires kernel_info()
-    # ThreadedKernelClient adds a _inspect for kernel_info before at the beginning of start_channels
-    @catch_exception
-    def on_first_shell_msg(self, msg):
-        assert msg['msg_type'] == 'kernel_info_reply'
-        if self._inspect_msg:
-            self._inspect_msg(msg)
-        self.log.info(self.format_msg('shell', msg))
-        for bufno in self.obuf:
-            self.buffers[bufno].append(msg['content']['banner'].split('\n'))
-        super(JupyterNvimBufferApp, self).on_first_shell_msg(msg)
 
     @catch_exception
     def handle_msg(self, channel, msg, **kwargs):

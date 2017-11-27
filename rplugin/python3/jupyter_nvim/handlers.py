@@ -21,6 +21,12 @@ class OutBufMsgHandler(MsgHandler):
             msg['handled'] = True
         return handled
 
+    def on_finish_kernel_info(self, kernel_info, pending_iopub_msgs):
+        self.buf.append(kernel_info['banner'].split('\n'))
+        for msg in pending_iopub_msgs:
+            # self.log.info(msg)
+            self('iopub', msg)
+
     def get_execute_output(self, data):
         # TODO: handle different mime types
         output = data.get('text/plain')
@@ -48,13 +54,13 @@ class OutBufMsgHandler(MsgHandler):
         content = msg.get('content')
         msg_type = msg.get('msg_type')
         parent_header = msg.get('parent_header')
-        if parent_header:
-            if msg_type in ['execute_input', 'execute_result']:
-                return self.handle_execute(msg_type, content)
-            elif msg_type == 'stream':
-                return self.handle_stream(content)
-            elif msg_type == 'error':
-                return self.handle_error(content)
+        # if parent_header:
+        if msg_type in ['execute_input', 'execute_result']:
+            return self.handle_execute(msg_type, content)
+        elif msg_type == 'stream':
+            return self.handle_stream(content)
+        elif msg_type == 'error':
+            return self.handle_error(content)
         return True
 
     def handle_execute(self, msg_type, content):
