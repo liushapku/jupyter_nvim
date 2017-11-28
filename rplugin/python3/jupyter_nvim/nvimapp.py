@@ -18,7 +18,6 @@ import traitlets
 import logging
 import datetime
 import io
-import tempfile
 from dateutil.tz import tzutc
 
 __all__ = (
@@ -41,18 +40,16 @@ __all__ = (
 
 
 class JupyterNvimBufferApp(JupyterChildApp):
-    def format_msg(self, channel, msg):
+    REQUEST = 0
+
+    def format_msg(self, handled, channel, msg):
         buf = io.StringIO()
-        if msg.pop('handled', False):
+        if handled:
             start, end = '=' * 4, '=' * 50
         else:
             start, end = '*' * 4, '*' * 50
         print(start, channel, self.msg_count[channel], '-', self.msg_count['all'], end, file=buf)
         msg_time = msg['header']['date']
-        if msg_time <= self.msg_last:
-            print('----', self.msg_last, msg_time, file=buf)
-        else:
-            self.msg_last = msg_time
         return self._format_msg(buf, channel, msg)
 
     def _format_msg(self, buf, channel, msg, ident=0):
@@ -77,7 +74,6 @@ class JupyterNvimBufferApp(JupyterChildApp):
 
         self.nvim = self.parent.nvim
         self._inspect_msg = None
-        self.msg_last = datetime.datetime.now(tz=tzutc())
         self.msg_count = {
             'shell': 0,
             'iopub': 0,
@@ -86,21 +82,24 @@ class JupyterNvimBufferApp(JupyterChildApp):
             'all': 0,
         }
 
-        self.waiting_list = set()
-        self.buf_handlers = []
+        self.execution_list = {}
+        self.waiting_list = {}
         self.obuf = set()
         self.ibuf = set()
         self.iobuf = set()
+        self.obuf_handler = OutBufMsgHandler(self.nvim, self.log)
 
-    def on_finish_kernel_info(self, kernel_info, pending_iopub_msg):
-        for handler in self.buf_handlers:
-            handler.on_finish_kernel_info(kernel_info, pending_iopub_msg)
+    def on_finish_kernel_info(self):
+        if self.obuf_handler:
+            self.obuf_handler.on_finish_kernel_info(self.kernel_info, self.pending_shell_msg, self.pending_iopub_msg)
+        self.pending_shell_msg.clear()
+        self.pending_iopub_msg.clear()
 
-
-    def register_out_vim_buffer(self, bufno):
-        if bufno not in self.obuf:
-            self.obuf.add(bufno)
-            self.buf_handlers.append(OutBufMsgHandler(self.nvim, self.buffers[bufno], self.log))
+    def register_out_vim_buffer(self, *bufnos):
+        for bufno in bufnos:
+            if bufno not in self.obuf:
+                self.obuf.add(bufno)
+                self.obuf_handler.bufs.append(self.buffers[bufno])
 
     def register_in_vim_buffer(self, bufno):
         self.ibuf.add(bufno)
@@ -111,38 +110,69 @@ class JupyterNvimBufferApp(JupyterChildApp):
     def output(self, msg):
         self.log.info(msg)
 
-    @catch_exception
+    def finish_message(self, pid):
+        del self.waiting_list[pid]
+        self.log.info('message %s finished', pid)
+
     def handle_msg(self, channel, msg, **kwargs):
+        if isinstance(msg, float):
+            print(channel, msg)
         self.msg_count[channel] += 1
         self.msg_count['all'] += 1
         if self._inspect_msg:
             self._inspect_msg(msg)
 
-        for handler in self.buf_handlers:
-            handler(channel, msg, **kwargs)
-        self.log.info(self.format_msg(channel, msg))
+        handled = False
+        if self.obuf_handler:
+            handled = self.obuf_handler(channel, msg, **kwargs)
+        self.log.info(self.format_msg(handled, channel, msg))
 
+    @catch_exception
     def on_shell_msg(self, msg):
-        self.handle_msg('shell', msg)
+        pid = self.get_parent_id(msg)
+        own = self.is_waiting_for(pid)
+        self.handle_msg('shell', msg, own=own)
+        if own:
+            assert msg['header']['msg_type'].endswith('_reply')
+            self.waiting_list[pid] += 1
+            if self.waiting_list[pid] >= 2:
+                self.finish_message(pid)
 
+    @catch_exception
     def on_iopub_msg(self, msg):
-        self.handle_msg('iopub', msg)
+        pid = self.get_parent_id(msg)
+        own = self.is_waiting_for(pid)
+        self.handle_msg('iopub', msg, own=own)
+        if own:
+            # finished
+            if msg['header']['msg_type'] == 'status' and msg['content']['execution_state'] == 'idle':
+                self.waiting_list[pid] += 1
+            if self.waiting_list[pid] >= 2:
+                self.finish_message(pid)
+        if msg['header']['msg_type'] == 'execute_input':
+            self.execution_list[pid] = msg['content']['execution_count']
 
+    @catch_exception
     def on_stdin_msg(self, msg):
         self.handle_msg('stdin', msg)
 
+    @catch_exception
     def on_hb_msg(self, msg):
-        self.handle_msg('hb', msg)
+        self.set_state('dead')
+        self.log.warning('heart beat: %f', msg)
 
-    def shell_send_callback(self, msgid):
+    def shell_send_callback(self, method, msgid):
         assert msgid not in self.waiting_list
         self.log.info('waiting for %s', msgid)
-        self.waiting_list.add(msgid)
+        self.waiting_list[msgid] = self.REQUEST
 
-    def is_waiting_for(self, parent_header):
+    def get_parent_id(self, msg):
+        parent_header = msg.get('parent_header')
         if parent_header:
-            return parent_header.get('msg_id') in self.waiting_list
-        return False
+            return parent_header['msg_id']
+
+    def is_waiting_for(self, parent_id):
+        return parent_id in self.waiting_list
 
     @property
     def buffers(self):
@@ -170,22 +200,27 @@ class JupyterNvimApp(JupyterContainerApp):
         self.nvim = nvim
         super(JupyterNvimApp, self).initialize(argv=argv)
         self.log.info('JupyterNvimApp Initialized')
+        self._current = None
 
     @property
     def buffers(self):
         return self.nvim.buffers
 
     def start_child_app(self, childid, argv=None, **kwargs):
-        if not any(buf.number == childid for buf in self.buffers):
-            self.log.error('chilid should be a buf number')
-            return
+        # if not any(buf.number == childid for buf in self.buffers):
+        #     self.log.error('chilid should be a buf number')
+        #     return
         bufapp = super(JupyterNvimApp, self).start_child_app(childid, argv, **kwargs)
-        bufapp.register_out_vim_buffer(childid)
         self.log.info('Started child app %d, connection file %s', childid, bufapp.connection_file)
+        self.set_current(childid)
         return bufapp
 
+    def set_current(self, childid):
+        if childid in self._child_apps:
+            self._current = childid
+        else:
+            self.log.error('child app with id %s does not exist', childid)
+
     def current_child(self):
-        current_buf = self.nvim.current.buffer.number
-        if current_buf in self._child_apps:
-            return current_buf
+        return self._current
 

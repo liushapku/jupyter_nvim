@@ -1,3 +1,6 @@
+import tempfile
+import re
+
 __all__ = (
     'MsgHandler',
     'OutBufMsgHandler'
@@ -5,85 +8,113 @@ __all__ = (
 
 # learn from notebook/services/kernels/handlers.py
 # learn from notebook/static/services/kernels/kernel.js
-class MsgHandler():
-    pass
 
-class OutBufMsgHandler(MsgHandler):
-    def __init__(self, nvim, buf, log):
+_control_seq = re.compile('\x1b\[[0-9;]+m')
+def remove_terminal_control_sequence(string):
+    return re.sub(_control_seq, '', string)
+
+def handle(channel, msg_type):
+    def wrapper(f):
+        def wrapped(self, *args, **kwargs):
+            return f(self, *args, **kwargs)
+        return wrapped
+    return wrapper
+
+class MsgHandler():
+    def __init__(self, nvim, log):
         self.nvim = nvim
-        self.buf = buf
+        self.bufs = []
         self.log = log
-        super(OutBufMsgHandler, self).__init__()
+
+    def __bool__(self):
+        return bool(self.bufs)
 
     def __call__(self, channel, msg, **kwargs):
-        handled = not self._dispatch(channel, msg, **kwargs)
-        if handled:
-            msg['handled'] = True
-        return handled
+        msg_type = msg['header']['msg_type']
+        func_name = channel + '_' + msg_type
 
-    def on_finish_kernel_info(self, kernel_info, pending_iopub_msgs):
-        self.buf.append(kernel_info['banner'].split('\n'))
-        for msg in pending_iopub_msgs:
-            # self.log.info(msg)
-            self('iopub', msg)
+        content = msg['content']
+        if hasattr(self, func_name):
+            getattr(self, func_name)(content, msg=msg, **kwargs)
+            return True
+        else:
+            return False
 
-    def get_execute_output(self, data):
+    def get_data(self, content):
         # TODO: handle different mime types
+        data = content['data']
         output = data.get('text/plain')
         if output is not None:
             return output
 
-    def format_input_output(self, isinput, execution_count, string):
+class OutBufMsgHandler(MsgHandler):
+    def append(self, lines):
+        if isinstance(lines, str):
+            lines = lines.split('\n')
+        for buf in self.bufs:
+            buf.append(lines)
+
+    def on_finish_kernel_info(self, kernel_info, pending_shell_msgs, pending_iopub_msgs):
+        self.append(kernel_info['banner'])
+        for msg in pending_shell_msgs:
+            self('shell', msg)
+        for msg in pending_iopub_msgs:
+            # self.log.info(msg)
+            self('iopub', msg)
+
+    def format_input(self, execution_count, string):
         lines = string.split('\n')
-        header1 = ('In ' if isinput else 'Out') + ' [{}]: '.format(execution_count)
+        header1 = 'In  [{}]: '.format(execution_count)
         headers = ' ' * (len(header1)-2) + ': '
         rv = []
         rv.append(header1 + lines[0])
         for line in lines[1:]:
             rv.append(headers + line)
-
-        # add a new line after output
-        if not isinput:
-            rv.append('')
         return rv
 
-    def _dispatch(self, channel, msg, **kwargs):
-        """
-        return: True if the msg is not handled
-        """
-        content = msg.get('content')
-        msg_type = msg.get('msg_type')
-        parent_header = msg.get('parent_header')
-        # if parent_header:
-        if msg_type in ['execute_input', 'execute_result']:
-            return self.handle_execute(msg_type, content)
-        elif msg_type == 'stream':
-            return self.handle_stream(content)
-        elif msg_type == 'error':
-            return self.handle_error(content)
-        return True
+    def format_output(self, execution_count, string):
+        lines = string.split('\n')
+        header = 'Out [{}]:'.format(execution_count)
+        if len(lines) > 1:
+            lines.insert(0, header)
+        else:
+            lines = [header + ' ' + lines[0]]
+        # add a new line after output
+        lines.append('')
+        return lines
 
-    def handle_execute(self, msg_type, content):
-        if msg_type == 'execute_input':
-            code = self.format_input_output(
-                True, content['execution_count'], content['code'])
-            self.buf.append(code)
-        elif msg_type == 'execute_result':
-            output = self.get_execute_output(content['data'])
-            if output:
-                output = self.format_input_output(
-                    False, content['execution_count'], output)
-                self.buf.append(output)
+    ### SHELL messages
+    def shell_inspect_reply(self, content, **kwargs):
+        if content['status'] == 'ok' and content['found']:
+            data = self.get_data(content)
+            data = remove_terminal_control_sequence(data)
+            self.append(data)
 
-    def handle_error(self, content, **kwargs):
-        message = content['{}: {}'.format(content['ename'], content['evalue'])]
-        self.buf.append(message.split('\n'))
-        with tempfile.TemporaryFile(mode='w') as tmp:
-            print(content['traceback'], file=tmp)
-            self.nvim.command('lgetfile ' + tmp.name)
+    ### IOPUB messages
+    def iopub_execute_input(self, content, **kwargs):
+        code = self.format_input(content['execution_count'], content['code'])
+        self.append(code)
 
-    def handle_stream(self, content):
+    def iopub_execute_result(self, content, **kwargs):
+        output = self.get_data(content)
+        if output:
+            output = self.format_output(content['execution_count'], output)
+            self.append(output)
+
+    def iopub_error(self, content, **kwargs):
+        message = '{}: {}'.format(content['ename'], content['evalue'])
+        self.append(message.split('\n'))
+        with tempfile.NamedTemporaryFile(mode='w', delete=False) as tmp:
+            print(tmp.name)
+            for line in content['traceback']:
+                line = remove_terminal_control_sequence(line)
+                print(line)
+                print(line, file=tmp)
+            self.nvim.command('cgetfile ' + tmp.name)
+
+    def iopub_stream(self, content, msg, **kwargs):
+        content = msg['content']
         stream = content['text'].split('\n')
         if stream and stream[-1] == '':
             stream.pop(-1)
-        self.buf.append(stream)
+        self.append(stream)
