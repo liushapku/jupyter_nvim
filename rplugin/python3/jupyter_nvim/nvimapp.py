@@ -88,6 +88,7 @@ class JupyterNvimBufferApp(JupyterChildApp):
         self.ibuf = set()
         self.iobuf = set()
         self.obuf_handler = OutBufMsgHandler(self.nvim, self.log)
+        self.iobuf_handler = OutBufMsgHandler(self.nvim, self.log)
 
     def on_finish_kernel_info(self):
         if self.obuf_handler:
@@ -95,17 +96,32 @@ class JupyterNvimBufferApp(JupyterChildApp):
         self.pending_shell_msg.clear()
         self.pending_iopub_msg.clear()
 
-    def register_out_vim_buffer(self, *bufnos):
-        for bufno in bufnos:
+    def _get_valid_bufs(self, bufnos):
+        buffers = {buf.number : buf for buf in self.buffers if buf.number in bufnos}
+        return buffers
+
+    def register_out_buffer(self, *bufnos):
+        valid_bufs = self._get_valid_bufs(bufnos)
+        added = False
+        for bufno, buf in valid_bufs.items():
             if bufno not in self.obuf:
                 self.obuf.add(bufno)
-                self.obuf_handler.bufs.append(self.buffers[bufno])
+                self.obuf_handler.bufs.append(buf)
+                added = True
+        return added
 
-    def register_in_vim_buffer(self, bufno):
+    def register_in_buffer(self, bufno):
         self.ibuf.add(bufno)
 
-    def register_io_vim_buffer(self, bufno):
-        self.iobuf.add(bufno)
+    def register_io_buffer(self, bufno):
+        valid_bufs = self._get_valid_bufs(bufnos)
+        added = False
+        for bufno, buf in valid_bufs:
+            if bufno not in self.iobuf:
+                self.iobuf.add(bufno)
+                self.iobuf_handler.bufs.append(buf)
+                added = True
+        return added
 
     def output(self, msg):
         self.log.info(msg)
@@ -187,9 +203,9 @@ class JupyterNvimApp(JupyterContainerApp):
     def _log_default(self):
         from traitlets import log
         logger = log.get_logger()
-        if 'JUPYTER_NVIM_LOGFILE' in os.environ:
-            print('logging to', os.environ['JUPYTER_NVIM_LOGFILE'])
-            logfile = os.environ['JUPYTER_NVIM_LOGFILE'].strip()
+        logfile = os.environ.get('JUPYTER_NVIM_LOG_FILE').strip()
+        if logfile:
+            print('logging to', logfile)
             logger.handlers = []
             logger.addHandler(logging.FileHandler(logfile, 'w'))
             logger.level = logging.INFO

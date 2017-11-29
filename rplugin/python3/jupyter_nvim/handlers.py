@@ -52,7 +52,7 @@ class OutBufMsgHandler(MsgHandler):
         if isinstance(lines, str):
             lines = lines.split('\n')
         for buf in self.bufs:
-            buf.append(lines)
+            self.nvim.async_call(buf.append, lines)
 
     def on_finish_kernel_info(self, kernel_info, pending_shell_msgs, pending_iopub_msgs):
         self.append(kernel_info['banner'])
@@ -110,7 +110,7 @@ class OutBufMsgHandler(MsgHandler):
                 line = remove_terminal_control_sequence(line)
                 print(line)
                 print(line, file=tmp)
-            self.nvim.command('cgetfile ' + tmp.name)
+            self.nvim.async_call(self.nvim.command, 'cgetfile ' + tmp.name)
 
     def iopub_stream(self, content, msg, **kwargs):
         content = msg['content']

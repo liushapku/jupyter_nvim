@@ -15,6 +15,6 @@ nvim = neovim.attach('socket', path=nvim_socket)
 app = napp.JupyterNvimApp()
 app.initialize(nvim, [])
 bufapp = app.start_child_app(1, ['-f=kernel-nvim-test.json'])
-bufapp.register_out_vim_buffer(1, 2)
+bufapp.register_out_buffer(1, 2)
 
 
