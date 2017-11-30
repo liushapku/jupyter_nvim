@@ -65,7 +65,7 @@ class OutBufMsgHandler(MsgHandler):
     def format_input(self, execution_count, string):
         lines = string.split('\n')
         header1 = 'In  [{}]: '.format(execution_count)
-        headers = ' ' * (len(header1)-2) + ': '
+        headers = ' ' * (len(header1)-5) + '...: '
         rv = []
         rv.append(header1 + lines[0])
         for line in lines[1:]:
@@ -104,13 +104,12 @@ class OutBufMsgHandler(MsgHandler):
     def iopub_error(self, content, **kwargs):
         message = '{}: {}'.format(content['ename'], content['evalue'])
         self.append(message.split('\n'))
-        with tempfile.NamedTemporaryFile(mode='w', delete=False) as tmp:
-            print(tmp.name)
-            for line in content['traceback']:
-                line = remove_terminal_control_sequence(line)
-                print(line)
-                print(line, file=tmp)
-            self.nvim.async_call(self.nvim.command, 'cgetfile ' + tmp.name)
+        traceback = [remove_terminal_control_sequence(line) for line in content['traceback']]
+        def set_traceback(nvim, traceback):
+            self.log.error('%s %s', type(nvim.api.vars), type(nvim))
+            nvim.vars['jupyter_nvim_traceback'] = traceback
+            nvim.command('cgetexpr jupyter_nvim_traceback')
+        self.nvim.async_call(set_traceback, self.nvim, traceback)
 
     def iopub_stream(self, content, msg, **kwargs):
         content = msg['content']
